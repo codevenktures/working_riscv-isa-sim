@@ -91,24 +91,21 @@ install path.
     $ cd build
     $ ../configure --prefix=$RISCV
     $ make
-    $ [sudo] make install
+    $ [sudo] make install   #will copy spike to $RISCV /bin
 
-If your system uses the `yum` package manager, you can substitute
-`yum install dtc` for the first step.
+IMPORTANT INSTALL STEPS
+-------------------------------------------
+This latest version doesnot need --enable-commitlogs with ../configure, 
+#git checkout fcbdbe7946079650d0e656fa3d353e3f652d471f # for older version where configure requires --enable-commitlogs
+but still requires passing --log-commits immediately following spike and definitely before -l ELF_file option
+Passing --log-commits at the end will not work. Passing it only before ELF is important. 
+ELF should be the last option to pass.
+-------------------------------------------
 
-Build Steps on OpenBSD
-----------------------
-
-Install bash, gmake, dtc, and use clang.
-
-    $ pkg_add bash gmake dtc
-    $ exec bash
-    $ export CC=cc; export CXX=c++
-    $ mkdir build
-    $ cd build
-    $ ../configure --prefix=$RISCV
-    $ gmake
-    $ [doas] make install
+Compiling and Running an asm with log.
+-------------------------------------------
+export SPIKE="$PWD/spike"
+$SPIKE --isa=rv64imafdc --log-commits -p1 -l ELF_file 
 
 Compiling and Running a Simple C Program
 -------------------------------------------
