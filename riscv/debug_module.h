@@ -89,6 +89,7 @@ typedef struct {
   bool access32;
   bool access16;
   bool access8;
+  bool sbbusyerror;
 } sbcs_t;
 
 typedef struct {
@@ -112,8 +113,6 @@ class debug_module_t : public abstract_device_t
      */
     debug_module_t(simif_t *sim, const debug_module_config_t &config);
     ~debug_module_t();
-
-    void add_device(bus_t *bus);
 
     bool load(reg_t addr, size_t len, uint8_t* bytes);
     bool store(reg_t addr, size_t len, const uint8_t* bytes);
@@ -159,8 +158,19 @@ class debug_module_t : public abstract_device_t
     uint32_t read32(uint8_t *rom, unsigned int index);
 
     void sb_autoincrement();
+
+    /* Start a system bus access. (It could be instantaneous, but to help test
+     * OpenOCD a delay can be added.) */
+    void sb_read_start();
+    void sb_write_start();
+
+    /* Actually read/write. */
     void sb_read();
     void sb_write();
+
+    /* Return true iff a system bus access is in progress. */
+    bool sb_busy() const;
+
     unsigned sb_access_bits();
 
     dmcontrol_t dmcontrol;
@@ -187,6 +197,14 @@ class debug_module_t : public abstract_device_t
 
     size_t selected_hart_id() const;
     hart_debug_state_t& selected_hart_state();
+
+    /* Whether the first 2 harts are available is controllable through DMCUSTOM,
+     * where bit 0 corresponds to hart 0, etc. When a bit is one the hart
+     * available.  Otherwise it is unavailable. */
+    bool hart_available_state[2];
+    bool hart_available(unsigned hart_id) const;
+
+    unsigned sb_read_wait, sb_write_wait;
 };
 
 #endif

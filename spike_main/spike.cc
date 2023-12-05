@@ -41,6 +41,7 @@ static void help(int exit_code = 1)
   fprintf(stderr, "  --debug-cmd=<name>    Read commands from file (use with -d)\n");
   fprintf(stderr, "  --isa=<name>          RISC-V ISA string [default %s]\n", DEFAULT_ISA);
   fprintf(stderr, "  --pmpregions=<n>      Number of PMP regions [default 16]\n");
+  fprintf(stderr, "  --pmpgranularity=<n>  PMP Granularity in bytes [default 4]\n");
   fprintf(stderr, "  --priv=<m|mu|msu>     RISC-V privilege modes supported [default %s]\n", DEFAULT_PRIV);
   fprintf(stderr, "  --varch=<name>        RISC-V Vector uArch string [default %s]\n", DEFAULT_VARCH);
   fprintf(stderr, "  --pc=<address>        Override ELF entry point\n");
@@ -50,12 +51,7 @@ static void help(int exit_code = 1)
   fprintf(stderr, "  --l2=<S>:<W>:<B>        B both powers of 2).\n");
   fprintf(stderr, "  --big-endian          Use a big-endian memory system.\n");
   fprintf(stderr, "  --misaligned          Support misaligned memory accesses\n");
-  fprintf(stderr, "  --device=<P,B,A>      Attach MMIO plugin device from an --extlib library\n");
-  fprintf(stderr, "                          P -- Name of the MMIO plugin\n");
-  fprintf(stderr, "                          B -- Base memory address of the device\n");
-  fprintf(stderr, "                          A -- String arguments to pass to the plugin\n");
-  fprintf(stderr, "                          This flag can be used multiple times.\n");
-  fprintf(stderr, "                          The extlib flag for the library must come first.\n");
+  fprintf(stderr, "  --device=<name>       Attach MMIO plugin device from an --extlib library\n");
   fprintf(stderr, "  --log-cache-miss      Generate a log of cache miss\n");
   fprintf(stderr, "  --log-commits         Generate a log of commits info\n");
   fprintf(stderr, "  --extension=<name>    Specify RoCC Extension\n");
@@ -109,7 +105,7 @@ static std::ifstream::pos_type get_file_size(const char *filename)
 }
 
 static void read_file_bytes(const char *filename,size_t fileoff,
-                            mem_t* mem, size_t memoff, size_t read_sz)
+                            abstract_mem_t* mem, size_t memoff, size_t read_sz)
 {
   std::ifstream in(filename, std::ios::in | std::ios::binary);
   in.seekg(fileoff, std::ios::beg);
@@ -265,9 +261,9 @@ static std::vector<mem_cfg_t> parse_mem_layout(const char* arg)
   return merged_mem;
 }
 
-static std::vector<std::pair<reg_t, mem_t*>> make_mems(const std::vector<mem_cfg_t> &layout)
+static std::vector<std::pair<reg_t, abstract_mem_t*>> make_mems(const std::vector<mem_cfg_t> &layout)
 {
-  std::vector<std::pair<reg_t, mem_t*>> mems;
+  std::vector<std::pair<reg_t, abstract_mem_t*>> mems;
   mems.reserve(layout.size());
   for (const auto &cfg : layout) {
     mems.push_back(std::make_pair(cfg.get_base(), new mem_t(cfg.get_size())));
@@ -336,7 +332,7 @@ int main(int argc, char** argv)
   bool dtb_enabled = true;
   const char* kernel = NULL;
   reg_t kernel_offset, kernel_size;
-  std::vector<std::pair<reg_t, abstract_device_t*>> plugin_devices;
+  std::vector<const device_factory_t*> plugin_device_factories;
   std::unique_ptr<icache_sim_t> ic;
   std::unique_ptr<dcache_sim_t> dc;
   std::unique_ptr<cache_sim_t> l2;
@@ -371,52 +367,18 @@ int main(int argc, char** argv)
             /*default_misaligned=*/false,
             /*default_endianness*/endianness_little,
             /*default_pmpregions=*/16,
+            /*default_pmpgranularity=*/(1 << PMP_SHIFT),
             /*default_mem_layout=*/parse_mem_layout("2048"),
             /*default_hartids=*/std::vector<size_t>(),
             /*default_real_time_clint=*/false,
             /*default_trigger_count=*/4);
 
-  auto const device_parser = [&plugin_devices](const char *s) {
-    const std::string str(s);
-    std::istringstream stream(str);
-
-    // We are parsing a string like name,base,args.
-
-    // Parse the name, which is simply all of the characters leading up to the
-    // first comma. The validity of the plugin name will be checked later.
-    std::string name;
-    std::getline(stream, name, ',');
-    if (name.empty()) {
-      throw std::runtime_error("Plugin name is empty.");
-    }
-
-    // Parse the base address. First, get all of the characters up to the next
-    // comma (or up to the end of the string if there is no comma). Then try to
-    // parse that string as an integer according to the rules of strtoull. It
-    // could be in decimal, hex, or octal. Fail if we were able to parse a
-    // number but there were garbage characters after the valid number. We must
-    // consume the entire string between the commas.
-    std::string base_str;
-    std::getline(stream, base_str, ',');
-    if (base_str.empty()) {
-      throw std::runtime_error("Device base address is empty.");
-    }
-    char* end;
-    reg_t base = static_cast<reg_t>(strtoull(base_str.c_str(), &end, 0));
-    if (end != &*base_str.cend()) {
-      throw std::runtime_error("Error parsing device base address.");
-    }
-
-    // The remainder of the string is the arguments. We could use getline, but
-    // that could ignore newline characters in the arguments. That should be
-    // rare and discouraged, but handle it here anyway with this weird in_avail
-    // technique. The arguments are optional, so if there were no arguments
-    // specified we could end up with an empty string here. That's okay.
-    auto avail = stream.rdbuf()->in_avail();
-    std::string args(avail, '\0');
-    stream.readsome(&args[0], avail);
-
-    plugin_devices.emplace_back(base, new mmio_plugin_device_t(name, args));
+  auto const device_parser = [&plugin_device_factories](const char *s) {
+    const std::string name(s);
+    if (name.empty()) throw std::runtime_error("Plugin name is empty.");
+    auto it = mmio_device_map().find(name);
+    if (it == mmio_device_map().end()) throw std::runtime_error("Plugin \"" + name + "\" not found in loaded extlibs.");
+    plugin_device_factories.push_back(it->second);
   };
 
   option_parser_t parser;
@@ -446,6 +408,7 @@ int main(int argc, char** argv)
   parser.option(0, "log-cache-miss", 0, [&](const char UNUSED *s){log_cache = true;});
   parser.option(0, "isa", 1, [&](const char* s){cfg.isa = s;});
   parser.option(0, "pmpregions", 1, [&](const char* s){cfg.pmpregions = atoul_safe(s);});
+  parser.option(0, "pmpgranularity", 1, [&](const char* s){cfg.pmpgranularity = atoul_safe(s);});
   parser.option(0, "priv", 1, [&](const char* s){cfg.priv = s;});
   parser.option(0, "varch", 1, [&](const char* s){cfg.varch = s;});
   parser.option(0, "device", 1, device_parser);
@@ -513,7 +476,8 @@ int main(int argc, char** argv)
   if (!*argv1)
     help();
 
-  std::vector<std::pair<reg_t, mem_t*>> mems = make_mems(cfg.mem_layout());
+  std::vector<std::pair<reg_t, abstract_mem_t*>> mems =
+      make_mems(cfg.mem_layout());
 
   if (kernel && check_file_exists(kernel)) {
     const char *isa = cfg.isa();
@@ -564,7 +528,7 @@ int main(int argc, char** argv)
   }
 
   sim_t s(&cfg, halted,
-      mems, plugin_devices, htif_args, dm_config, log_path, dtb_enabled, dtb_file,
+      mems, plugin_device_factories, htif_args, dm_config, log_path, dtb_enabled, dtb_file,
       socket,
       cmd_file);
   std::unique_ptr<remote_bitbang_t> remote_bitbang((remote_bitbang_t *) NULL);
@@ -601,9 +565,6 @@ int main(int argc, char** argv)
 
   for (auto& mem : mems)
     delete mem.second;
-
-  for (auto& plugin_device : plugin_devices)
-    delete plugin_device.second;
 
   return return_code;
 }
